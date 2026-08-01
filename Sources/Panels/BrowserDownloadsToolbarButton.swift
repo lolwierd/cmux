@@ -73,6 +73,7 @@ struct BrowserDownloadsToolbarButton: View {
         .buttonStyle(OmnibarAddressButtonStyle())
         .safeHelp(String(localized: "browser.downloads.title", defaultValue: "Downloads"))
         .accessibilityLabel(String(localized: "browser.downloads.title", defaultValue: "Downloads"))
+        .accessibilityIdentifier("BrowserDownloadsButton")
         .onChange(of: isPresented) { _, presented in
             if presented {
                 seenIDs = Set(downloads.map(\.id))
@@ -100,6 +101,7 @@ private struct BrowserDownloadsPopoverContent: View {
             HStack {
                 Text(String(localized: "browser.downloads.title", defaultValue: "Downloads"))
                     .font(.headline)
+                    .accessibilityIdentifier("BrowserDownloadsPopoverTitle")
                 Spacer()
                 if !downloads.isEmpty {
                     Button(String(localized: "browser.downloads.clear", defaultValue: "Clear")) {
@@ -135,6 +137,8 @@ private struct BrowserDownloadsPopoverContent: View {
             }
         }
         .frame(width: 340)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("BrowserDownloadsPopover")
     }
 }
 
@@ -152,6 +156,7 @@ private struct BrowserDownloadRow: View {
                 Text(record.filename)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .accessibilityIdentifier("BrowserDownloadFilename")
                 Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(record.state == .failed ? Color.red : Color.secondary)
@@ -165,6 +170,7 @@ private struct BrowserDownloadRow: View {
                 }
                 .buttonStyle(.borderless)
                 .font(.callout)
+                .accessibilityIdentifier("BrowserDownloadOpenButton")
 
                 Button {
                     onReveal(record)
