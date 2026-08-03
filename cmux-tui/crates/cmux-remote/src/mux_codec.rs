@@ -11,7 +11,7 @@ const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_IN_FLIGHT_LINES: usize = 256;
 const MAX_IN_FLIGHT_BYTES: usize = 32 * 1024 * 1024;
 
-pub(crate) fn encode_line(message: u64, line: &[u8]) -> Result<Vec<Bytes>, MuxCodecError> {
+pub fn encode_line(message: u64, line: &[u8]) -> Result<Vec<Bytes>, MuxCodecError> {
     if line.len() > MAX_LINE_BYTES {
         return Err(MuxCodecError::LineTooLarge(line.len()));
     }
@@ -39,7 +39,7 @@ fn encode_part(message: u64, part: u32, parts: u32, payload: &[u8]) -> Bytes {
 }
 
 #[derive(Default)]
-pub(crate) struct MuxLineAssembler {
+pub struct MuxLineAssembler {
     lines: HashMap<u64, PartialLine>,
     bytes: usize,
 }
@@ -52,7 +52,7 @@ struct PartialLine {
 }
 
 impl MuxLineAssembler {
-    pub(crate) fn push(
+    pub fn push(
         &mut self,
         lane: Lane,
         packet: Bytes,
