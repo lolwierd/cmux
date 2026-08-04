@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{CStr, c_char, c_void};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -16,13 +16,10 @@ use cmux_remote::provider::{
 };
 use cmux_remote::service::{EndpointRole, ServiceMultiplexer, ServiceStream};
 use cmux_remote_protocol::{Lane, LanePolicy, Service, ServiceControl, SessionId};
-use cmux_tui_core::apply_terminal_color_overrides;
-use cmux_tui_core::resource::TerminalPublicId;
-use cmux_tui_core::terminal_host_protocol::{
+use cmux_terminal_host_protocol::{
     Frame, FrameDecoder, MAX_FRAME_PAYLOAD, MessageKind, encode_frame,
 };
-use cmux_tui_core::terminal_host_runtime::decode_host_snapshot_payload;
-use cmux_tui_core::terminal_host_runtime::decode_terminal_color_overrides;
+#[cfg(feature = "text-renderer")]
 use ghostty_vt::{
     Callbacks, CellWidth, KeyAction, KeyEncoder, RenderState, Terminal, key_input_from_chord,
 };
@@ -34,6 +31,230 @@ use zeroize::Zeroizing;
 mod frontend;
 
 const CONNECTION_TIMEOUT_ERROR: &str = "terminal connection timed out";
+const MAX_NATIVE_RENDER_EVENT_BYTES: usize = 32 * 1024 * 1024;
+const MAX_NATIVE_RENDER_EVENTS: usize = 4096;
+const MAX_SNAPSHOT_REPLAY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_SNAPSHOT_STRING_BYTES: usize = 256 * 1024;
+const MAX_SNAPSHOT_ARGUMENTS: usize = 256;
+
+#[derive(Clone)]
+struct TerminalPublicId(String);
+
+impl TerminalPublicId {
+    fn parse(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        let Some(payload) = value.strip_prefix("term_") else {
+            return Err("expected a term_ public ID".into());
+        };
+        if payload.len() != 32
+            || !payload.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err("expected 32 lowercase hexadecimal digits after term_".into());
+        }
+        Ok(Self(value))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for TerminalPublicId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+struct RendererSnapshot {
+    cols: u16,
+    rows: u16,
+    replay: Vec<u8>,
+}
+
+struct SnapshotDecoder<'a> {
+    payload: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> SnapshotDecoder<'a> {
+    fn new(payload: &'a [u8]) -> Self {
+        Self { payload, offset: 0 }
+    }
+
+    fn take(&mut self, length: usize) -> Result<&'a [u8], String> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .filter(|end| *end <= self.payload.len())
+            .ok_or_else(|| "truncated terminal snapshot".to_string())?;
+        let bytes = &self.payload[self.offset..end];
+        self.offset = end;
+        Ok(bytes)
+    }
+
+    fn u8(&mut self) -> Result<u8, String> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u16(&mut self) -> Result<u16, String> {
+        Ok(u16::from_le_bytes(self.take(2)?.try_into().expect("fixed u16 slice")))
+    }
+
+    fn u32(&mut self) -> Result<u32, String> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("fixed u32 slice")))
+    }
+
+    fn bytes(&mut self, maximum: usize) -> Result<&'a [u8], String> {
+        let length = self.u32()? as usize;
+        if length > maximum {
+            return Err("terminal snapshot field is too large".into());
+        }
+        self.take(length)
+    }
+
+    fn string(&mut self) -> Result<(), String> {
+        std::str::from_utf8(self.bytes(MAX_SNAPSHOT_STRING_BYTES)?)
+            .map(|_| ())
+            .map_err(|_| "terminal snapshot string is not UTF-8".into())
+    }
+
+    fn finish(self) -> Result<(), String> {
+        if self.offset != self.payload.len() {
+            return Err("terminal snapshot has trailing bytes".into());
+        }
+        Ok(())
+    }
+}
+
+fn decode_renderer_snapshot(payload: &[u8]) -> Result<RendererSnapshot, String> {
+    let mut decoder = SnapshotDecoder::new(payload);
+    let cols = decoder.u16()?;
+    let rows = decoder.u16()?;
+    if cols == 0 || rows == 0 {
+        return Err("terminal snapshot dimensions must be nonzero".into());
+    }
+    let _pid = decoder.u32()?;
+    let replay = decoder.bytes(MAX_SNAPSHOT_REPLAY_BYTES)?.to_vec();
+    match decoder.u8()? {
+        0 => {}
+        1 => decoder.string()?,
+        _ => return Err("terminal snapshot has an invalid optional string".into()),
+    }
+    let argument_count = decoder.u16()? as usize;
+    if argument_count > MAX_SNAPSHOT_ARGUMENTS {
+        return Err("terminal snapshot has too many command arguments".into());
+    }
+    for _ in 0..argument_count {
+        decoder.string()?;
+    }
+    decoder.finish()?;
+    Ok(RendererSnapshot { cols, rows, replay })
+}
+
+fn decode_terminal_color_state_as_vt(payload: &[u8]) -> Result<Vec<u8>, String> {
+    const VERSION_1: u16 = 1;
+    const VERSION_2: u16 = 2;
+    const MAXIMUM_LENGTH: usize = 8 + 3 * 3 + 2 + 256 * 4;
+
+    if payload.len() < 8 || payload.len() > MAXIMUM_LENGTH {
+        return Err("terminal Colors payload length is out of range".into());
+    }
+    let version = u16::from_le_bytes(payload[0..2].try_into().expect("fixed version slice"));
+    let flags = u16::from_le_bytes(payload[2..4].try_into().expect("fixed flags slice"));
+    let palette_count =
+        u16::from_le_bytes(payload[4..6].try_into().expect("fixed count slice")) as usize;
+    let reserved = u16::from_le_bytes(payload[6..8].try_into().expect("fixed reserved slice"));
+    let allowed_flags = match version {
+        VERSION_1 => 0b111,
+        VERSION_2 if flags & 0b1000 != 0 => 0b1111,
+        VERSION_2 => return Err("terminal Colors v2 is missing cursor state".into()),
+        _ => return Err("terminal Colors version is unsupported".into()),
+    };
+    if flags & !allowed_flags != 0 || reserved != 0 || palette_count > 256 {
+        return Err("terminal Colors header is invalid".into());
+    }
+    let expected = 8
+        + (flags & 0b111).count_ones() as usize * 3
+        + usize::from(flags & 0b1000 != 0) * 2
+        + palette_count * 4;
+    if payload.len() != expected {
+        return Err("terminal Colors payload is malformed".into());
+    }
+
+    fn take_rgb(payload: &[u8], offset: &mut usize) -> [u8; 3] {
+        let color = [payload[*offset], payload[*offset + 1], payload[*offset + 2]];
+        *offset += 3;
+        color
+    }
+
+    fn append_dynamic_color(output: &mut Vec<u8>, code: u16, color: [u8; 3]) {
+        output.extend_from_slice(
+            format!("\x1b]{code};rgb:{:02x}/{:02x}/{:02x}\x1b\\", color[0], color[1], color[2])
+                .as_bytes(),
+        );
+    }
+
+    let mut offset = 8;
+    let foreground = (flags & 1 != 0).then(|| take_rgb(payload, &mut offset));
+    let background = (flags & 2 != 0).then(|| take_rgb(payload, &mut offset));
+    let cursor = (flags & 4 != 0).then(|| take_rgb(payload, &mut offset));
+    let cursor_visual = if flags & 8 != 0 {
+        let style = payload[offset];
+        let blink = payload[offset + 1];
+        if !(1..=3).contains(&style) || blink > 1 {
+            return Err("terminal Colors cursor state is invalid".into());
+        }
+        offset += 2;
+        Some((style, blink != 0))
+    } else {
+        None
+    };
+
+    let mut palette = [None; 256];
+    for _ in 0..palette_count {
+        let index = payload[offset] as usize;
+        if palette[index].is_some() {
+            return Err("terminal Colors contains a duplicate palette index".into());
+        }
+        palette[index] = Some([payload[offset + 1], payload[offset + 2], payload[offset + 3]]);
+        offset += 4;
+    }
+
+    let mut output = if cursor_visual.is_some() { b"\x1b[0 q".to_vec() } else { Vec::new() };
+    if let Some(color) = foreground {
+        append_dynamic_color(&mut output, 10, color);
+    }
+    if let Some(color) = background {
+        append_dynamic_color(&mut output, 11, color);
+    }
+    if let Some(color) = cursor {
+        append_dynamic_color(&mut output, 12, color);
+    }
+    if let Some((style, blink)) = cursor_visual {
+        let value = match (style, blink) {
+            (1, true) => 1,
+            (1, false) => 2,
+            (2, true) => 3,
+            (2, false) => 4,
+            (3, true) => 5,
+            (3, false) => 6,
+            _ => unreachable!("cursor state validated above"),
+        };
+        output.extend_from_slice(format!("\x1b[{value} q").as_bytes());
+    }
+    for (index, color) in palette.into_iter().enumerate() {
+        if let Some(color) = color {
+            output.extend_from_slice(
+                format!(
+                    "\x1b]4;{index};rgb:{:02x}/{:02x}/{:02x}\x1b\\",
+                    color[0], color[1], color[2]
+                )
+                .as_bytes(),
+            );
+        }
+    }
+    Ok(output)
+}
 
 pub struct CmuxTerminalClient {
     runtime: Runtime,
@@ -104,10 +325,14 @@ impl ActiveTerminal {
 }
 
 struct ClientState {
+    #[cfg(feature = "text-renderer")]
     terminal: Option<Terminal>,
+    #[cfg(feature = "text-renderer")]
     key_encoder: KeyEncoder,
+    #[cfg(feature = "text-renderer")]
     render: RenderState,
     frame_text: String,
+    #[cfg(feature = "text-renderer")]
     render_dirty: bool,
     status: String,
     transport_provider: String,
@@ -126,6 +351,26 @@ struct ClientState {
     expected_sequence: Option<u64>,
     cols: u16,
     rows: u16,
+    native_render_events: Option<VecDeque<NativeRenderEvent>>,
+    native_render_event_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+enum NativeRenderEventKind {
+    Reset = 1,
+    Bytes = 2,
+    Resize = 3,
+    Ready = 4,
+    Exit = 5,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeRenderEvent {
+    kind: NativeRenderEventKind,
+    cols: u16,
+    rows: u16,
+    payload: Vec<u8>,
 }
 
 #[derive(Serialize)]
@@ -165,10 +410,14 @@ impl ClientState {
         terminal_id: TerminalPublicId,
     ) -> Result<Self, String> {
         Ok(Self {
+            #[cfg(feature = "text-renderer")]
             terminal: None,
+            #[cfg(feature = "text-renderer")]
             key_encoder: KeyEncoder::new().map_err(|error| error.to_string())?,
+            #[cfg(feature = "text-renderer")]
             render: RenderState::new().map_err(|error| error.to_string())?,
             frame_text: String::new(),
+            #[cfg(feature = "text-renderer")]
             render_dirty: false,
             status: "bootstrap".into(),
             transport_provider: provider,
@@ -187,13 +436,74 @@ impl ClientState {
             expected_sequence: None,
             cols: 0,
             rows: 0,
+            native_render_events: None,
+            native_render_event_bytes: 0,
         })
     }
 
+    fn enable_native_render_events(&mut self) {
+        self.native_render_events = Some(VecDeque::new());
+        self.native_render_event_bytes = 0;
+    }
+
+    fn push_native_render_event(
+        &mut self,
+        kind: NativeRenderEventKind,
+        cols: u16,
+        rows: u16,
+        payload: Vec<u8>,
+    ) -> bool {
+        let Some(events) = self.native_render_events.as_mut() else { return true };
+        if kind == NativeRenderEventKind::Bytes && payload.is_empty() {
+            return true;
+        }
+        if events.len() >= MAX_NATIVE_RENDER_EVENTS
+            || self.native_render_event_bytes.saturating_add(payload.len())
+                > MAX_NATIVE_RENDER_EVENT_BYTES
+        {
+            events.clear();
+            self.native_render_event_bytes = 0;
+            return false;
+        }
+        if kind == NativeRenderEventKind::Bytes
+            && let Some(previous) = events.back_mut()
+            && previous.kind == NativeRenderEventKind::Bytes
+            && previous.payload.len().saturating_add(payload.len()) <= 1024 * 1024
+        {
+            self.native_render_event_bytes =
+                self.native_render_event_bytes.saturating_add(payload.len());
+            previous.payload.extend_from_slice(&payload);
+            return true;
+        }
+        self.native_render_event_bytes =
+            self.native_render_event_bytes.saturating_add(payload.len());
+        events.push_back(NativeRenderEvent { kind, cols, rows, payload });
+        true
+    }
+
+    fn continue_after_native_event(
+        &mut self,
+        kind: NativeRenderEventKind,
+        cols: u16,
+        rows: u16,
+        payload: Vec<u8>,
+    ) -> FrameEffect {
+        if self.push_native_render_event(kind, cols, rows, payload) {
+            FrameEffect::Continue
+        } else {
+            self.status = "renderer-backpressure".into();
+            self.resync_count = self.resync_count.saturating_add(1);
+            FrameEffect::Restart
+        }
+    }
+
     fn prepare_handshake(&mut self, terminal_id: TerminalPublicId) -> Result<(), String> {
-        self.terminal = None;
-        self.render = RenderState::new().map_err(|error| error.to_string())?;
-        self.render_dirty = false;
+        #[cfg(feature = "text-renderer")]
+        {
+            self.terminal = None;
+            self.render = RenderState::new().map_err(|error| error.to_string())?;
+            self.render_dirty = false;
+        }
         self.status = "resyncing".into();
         self.terminal_id = terminal_id;
         self.snapshot_boundary = 0;
@@ -203,9 +513,14 @@ impl ClientState {
         self.expected_sequence = None;
         self.cols = 0;
         self.rows = 0;
+        if let Some(events) = self.native_render_events.as_mut() {
+            events.clear();
+        }
+        self.native_render_event_bytes = 0;
         Ok(())
     }
 
+    #[cfg(feature = "text-renderer")]
     fn encode_key(&mut self, chord: &str, repeat: bool) -> Result<Vec<u8>, String> {
         let mut input = key_input_from_chord(chord)
             .ok_or_else(|| format!("unsupported terminal key chord: {chord}"))?;
@@ -222,15 +537,24 @@ impl ClientState {
         Ok(encoded)
     }
 
+    #[cfg(not(feature = "text-renderer"))]
+    fn encode_key(&mut self, _chord: &str, _repeat: bool) -> Result<Vec<u8>, String> {
+        Err("named key encoding is unavailable in a native-renderer build".into())
+    }
+
     fn apply(&mut self, frame: Frame) -> Result<FrameEffect, String> {
         let effect = match frame.kind {
             MessageKind::Snapshot => {
-                let snapshot = decode_host_snapshot_payload(&frame.payload)
-                    .map_err(|error| error.to_string())?;
-                let mut terminal =
-                    Terminal::new(snapshot.cols, snapshot.rows, 100_000, Callbacks::default())
-                        .map_err(|error| error.to_string())?;
-                terminal.vt_write(&snapshot.replay);
+                let snapshot = decode_renderer_snapshot(&frame.payload)?;
+                #[cfg(feature = "text-renderer")]
+                {
+                    let mut terminal =
+                        Terminal::new(snapshot.cols, snapshot.rows, 100_000, Callbacks::default())
+                            .map_err(|error| error.to_string())?;
+                    terminal.vt_write(&snapshot.replay);
+                    self.terminal = Some(terminal);
+                    self.render_dirty = true;
+                }
                 self.cols = snapshot.cols;
                 self.rows = snapshot.rows;
                 self.snapshot_boundary = frame.sequence;
@@ -239,47 +563,74 @@ impl ClientState {
                 self.local_parser_cursor = frame.sequence;
                 self.source_cursor = frame.sequence;
                 self.expected_sequence = frame.sequence.checked_add(1);
-                self.terminal = Some(terminal);
                 self.status = "snapshot".into();
-                self.render_dirty = true;
-                FrameEffect::Continue
+                self.continue_after_native_event(
+                    NativeRenderEventKind::Reset,
+                    snapshot.cols,
+                    snapshot.rows,
+                    snapshot.replay,
+                )
             }
             MessageKind::Colors if frame.sequence == self.snapshot_boundary => {
-                let colors = decode_terminal_color_overrides(&frame.payload)
-                    .map_err(|error| error.to_string())?;
-                apply_terminal_color_overrides(
-                    self.terminal
-                        .as_mut()
-                        .ok_or_else(|| "Colors arrived before snapshot".to_string())?,
-                    &colors,
-                );
+                if self.snapshot_bytes == 0 {
+                    return Err("Colors arrived before snapshot".into());
+                }
+                let transition = decode_terminal_color_state_as_vt(&frame.payload)?;
+                #[cfg(feature = "text-renderer")]
+                self.terminal
+                    .as_mut()
+                    .ok_or_else(|| "Colors arrived before snapshot".to_string())?
+                    .vt_write(&transition);
                 self.bootstrap_frames = self.bootstrap_frames.saturating_add(1);
-                self.render_dirty = true;
-                FrameEffect::Continue
+                #[cfg(feature = "text-renderer")]
+                {
+                    self.render_dirty = true;
+                }
+                self.continue_after_native_event(
+                    NativeRenderEventKind::Bytes,
+                    self.cols,
+                    self.rows,
+                    transition,
+                )
             }
             MessageKind::Ready if frame.sequence == self.snapshot_boundary => {
                 self.ready = true;
                 self.status = "live".into();
                 self.bootstrap_frames = self.bootstrap_frames.saturating_add(1);
-                FrameEffect::Continue
+                self.continue_after_native_event(
+                    NativeRenderEventKind::Ready,
+                    self.cols,
+                    self.rows,
+                    Vec::new(),
+                )
             }
             MessageKind::Output => {
                 self.require_sequence(frame.sequence)?;
-                let terminal = self
-                    .terminal
+                let output = frame.payload;
+                #[cfg(feature = "text-renderer")]
+                self.terminal
                     .as_mut()
-                    .ok_or_else(|| "output arrived before snapshot".to_string())?;
-                terminal.vt_write(&frame.payload);
-                self.raw_bytes = self.raw_bytes.saturating_add(frame.payload.len() as u64);
+                    .ok_or_else(|| "output arrived before snapshot".to_string())?
+                    .vt_write(&output);
+                self.raw_bytes = self.raw_bytes.saturating_add(output.len() as u64);
                 self.raw_frames = self.raw_frames.saturating_add(1);
                 self.local_parser_cursor = frame.sequence;
-                self.render_dirty = true;
-                FrameEffect::Continue
+                #[cfg(feature = "text-renderer")]
+                {
+                    self.render_dirty = true;
+                }
+                self.continue_after_native_event(
+                    NativeRenderEventKind::Bytes,
+                    self.cols,
+                    self.rows,
+                    output,
+                )
             }
             MessageKind::Resized if frame.payload.len() == 4 => {
                 self.require_sequence(frame.sequence)?;
                 let cols = u16::from_le_bytes([frame.payload[0], frame.payload[1]]).max(1);
                 let rows = u16::from_le_bytes([frame.payload[2], frame.payload[3]]).max(1);
+                #[cfg(feature = "text-renderer")]
                 self.terminal
                     .as_mut()
                     .ok_or_else(|| "resize arrived before snapshot".to_string())?
@@ -288,15 +639,34 @@ impl ClientState {
                 self.cols = cols;
                 self.rows = rows;
                 self.local_parser_cursor = frame.sequence;
-                self.render_dirty = true;
-                FrameEffect::Continue
+                #[cfg(feature = "text-renderer")]
+                {
+                    self.render_dirty = true;
+                }
+                self.continue_after_native_event(
+                    NativeRenderEventKind::Resize,
+                    cols,
+                    rows,
+                    Vec::new(),
+                )
             }
             MessageKind::Exit => {
                 self.require_sequence(frame.sequence)?;
                 self.local_parser_cursor = frame.sequence;
                 self.ready = false;
                 self.status = "exited".into();
-                FrameEffect::Stop
+                if self.push_native_render_event(
+                    NativeRenderEventKind::Exit,
+                    self.cols,
+                    self.rows,
+                    Vec::new(),
+                ) {
+                    FrameEffect::Stop
+                } else {
+                    self.status = "renderer-backpressure".into();
+                    self.resync_count = self.resync_count.saturating_add(1);
+                    FrameEffect::Restart
+                }
             }
             MessageKind::ResyncRequired => {
                 self.source_cursor = frame.sequence;
@@ -324,6 +694,7 @@ impl ClientState {
         Ok(())
     }
 
+    #[cfg(feature = "text-renderer")]
     fn materialize_frame(&mut self) -> Result<(), String> {
         if !self.render_dirty {
             return Ok(());
@@ -342,6 +713,11 @@ impl ClientState {
         self.frame_text = text;
         self.render_dirty = false;
         Ok(())
+    }
+
+    #[cfg(not(feature = "text-renderer"))]
+    fn materialize_frame(&mut self) -> Result<(), String> {
+        Err("plain-text rendering is unavailable in a native-renderer build".into())
     }
 
     fn diagnostics(&self) -> String {
@@ -369,6 +745,7 @@ impl ClientState {
     }
 }
 
+#[cfg(feature = "text-renderer")]
 fn append_row(output: &mut String, row: &[ghostty_vt::Cell]) {
     for cell in row {
         match cell.width {
@@ -1896,15 +2273,7 @@ mod tests {
 
                         let colors = Frame {
                             sequence: boundary,
-                            ..Frame::new(
-                                MessageKind::Colors,
-                                cmux_tui_core::terminal_host_runtime::encode_terminal_color_overrides(
-                                    &ghostty_vt::TerminalColorOverrides {
-                                        cursor_visual: Some((ghostty_vt::CursorShape::Block, false)),
-                                        ..Default::default()
-                                    },
-                                ),
-                            )
+                            ..Frame::new(MessageKind::Colors, test_colors_payload())
                         };
                         send_test_terminal_frame(&incoming.stream, colors).await;
                         let mut ready = Frame::new(MessageKind::Ready, Vec::new());
@@ -1912,8 +2281,7 @@ mod tests {
                         send_test_terminal_frame(&incoming.stream, ready).await;
 
                         if round == 0 {
-                            let mut resync =
-                                Frame::new(MessageKind::ResyncRequired, Vec::new());
+                            let mut resync = Frame::new(MessageKind::ResyncRequired, Vec::new());
                             resync.sequence = boundary + 1;
                             send_test_terminal_frame(&incoming.stream, resync).await;
                         } else {
