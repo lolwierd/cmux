@@ -11,8 +11,8 @@ import SwiftUI
 @MainActor
 final class SidebarGroupHeaderTableCellView: NSTableCellView {
     static let reuseIdentifier = NSUserInterfaceItemIdentifier("SidebarGroupHeaderTableCellView")
-    private static let backgroundCornerRadius: CGFloat = 8
-    private static let hoverBackgroundOpacity: CGFloat = 0.07
+    private static let backgroundCornerRadius: CGFloat = 10
+    private static let hoverBackgroundOpacity: CGFloat = 0.08
 
     private let backgroundView = NSView()
     private let pinImageView = NSImageView()
@@ -168,7 +168,7 @@ final class SidebarGroupHeaderTableCellView: NSTableCellView {
             ofSize: GlobalFontMagnification.scaledSize(metrics.nameFontSize, percent: percent),
             weight: .regular
         )
-        let nameColor = model.isAnchorActive ? NSColor.labelColor : NSColor.labelColor.withAlphaComponent(0.9)
+        let nameColor = NSColor.labelColor
         if let rendered = SidebarMarkdownRenderer(markdown: model.name).inline {
             nameField.attributedStringValue = SidebarRowPalette.attributed(
                 rendered,
@@ -299,7 +299,7 @@ final class SidebarGroupHeaderTableCellView: NSTableCellView {
         backgroundView.layer?.cornerRadius = Self.backgroundCornerRadius
         backgroundView.layer?.backgroundColor = NSColor.clear.cgColor
         CATransaction.commit()
-        recolorName(NSColor.labelColor.withAlphaComponent(0.9))
+        recolorName(.labelColor)
     }
 
     /// Inverse of the press treatment: previewing a different row must peel a
@@ -324,7 +324,10 @@ final class SidebarGroupHeaderTableCellView: NSTableCellView {
 
     private func headerBackgroundColor(for model: SidebarGroupHeaderRowModel) -> NSColor {
         if model.isAnchorActive {
-            return NSColor.labelColor.withAlphaComponent(0.08)
+            let scheme: ColorScheme = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? .dark
+                : .light
+            return sidebarSelectedWorkspaceBackgroundNSColor(for: scheme)
         }
         if model.isMultiSelected {
             return headerMultiSelectionBackgroundColor(for: model)

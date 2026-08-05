@@ -50,9 +50,9 @@ final class SidebarSelectedWorkspaceColorTests: XCTestCase {
             return
         }
 
-        XCTAssertEqual(color.redComponent, 0, accuracy: 0.001)
-        XCTAssertEqual(color.greenComponent, 136.0 / 255.0, accuracy: 0.001)
-        XCTAssertEqual(color.blueComponent, 1.0, accuracy: 0.001)
+        XCTAssertEqual(color.redComponent, 0.86, accuracy: 0.001)
+        XCTAssertEqual(color.greenComponent, 0.86, accuracy: 0.001)
+        XCTAssertEqual(color.blueComponent, 0.86, accuracy: 0.001)
         XCTAssertEqual(color.alphaComponent, 1.0, accuracy: 0.001)
     }
 
@@ -62,9 +62,9 @@ final class SidebarSelectedWorkspaceColorTests: XCTestCase {
             return
         }
 
-        XCTAssertEqual(color.redComponent, 0, accuracy: 0.001)
-        XCTAssertEqual(color.greenComponent, 145.0 / 255.0, accuracy: 0.001)
-        XCTAssertEqual(color.blueComponent, 1.0, accuracy: 0.001)
+        XCTAssertEqual(color.redComponent, 0.27, accuracy: 0.001)
+        XCTAssertEqual(color.greenComponent, 0.27, accuracy: 0.001)
+        XCTAssertEqual(color.blueComponent, 0.27, accuracy: 0.001)
         XCTAssertEqual(color.alphaComponent, 1.0, accuracy: 0.001)
     }
 

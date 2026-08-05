@@ -216,6 +216,42 @@ struct SidebarWorkspaceTableRowConfiguration {
         return self
     }
 
+    /// Returns the same immutable row with only its transient drag hierarchy
+    /// adjusted. Canonical group membership still comes from the next model
+    /// apply after drop; this copy exists solely for the live AppKit preview.
+    func applyingDragPreviewGroupId(_ previewGroupId: UUID?) -> Self {
+        guard !isGroupHeader,
+              var model = appKitWorkspaceRowModel,
+              let actions = appKitWorkspaceRowActions else {
+            return self
+        }
+        model.isGrouped = previewGroupId != nil
+        let previewRebuild = appKitWorkspaceRowRebuild.map { rebuild in
+            { @MainActor in
+                var fresh = rebuild()
+                fresh.isGrouped = previewGroupId != nil
+                return fresh
+            }
+        }
+        let previewUnreadRebuild = appKitWorkspaceUnreadRebuild.map { rebuild in
+            { @MainActor snapshot in
+                var fresh = rebuild(snapshot)
+                fresh.isGrouped = previewGroupId != nil
+                return fresh
+            }
+        }
+        return Self(
+            workspaceRowModel: model,
+            actions: actions,
+            groupId: previewGroupId,
+            isPinned: isPinned,
+            environment: environment,
+            workspace: appKitWorkspaceRowWorkspace,
+            rebuild: previewRebuild,
+            unreadRebuild: previewUnreadRebuild
+        )
+    }
+
     /// Keeps the immutable paint model while dropping every live action,
     /// workspace, and hosted-content capture during retained hidden display.
     func presentationSnapshot() -> Self {

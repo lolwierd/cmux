@@ -853,6 +853,35 @@ struct SidebarAppKitRowCellTests {
     }
 
     @Test
+    func arcGroupChildTitleAlignsWithHeaderTitle() throws {
+        var childModel = Self.makeModel(canClose: false)
+        childModel.isGrouped = true
+        let child = Self.configuredCell(model: childModel)
+        child.frame = NSRect(x: 0, y: 0, width: 320, height: 44)
+        child.layoutSubtreeIfNeeded()
+        let childTitle = try #require(
+            Self.descendants(of: child)
+                .compactMap { $0 as? NSTextField }
+                .first { $0.accessibilityIdentifier() == "SidebarWorkspaceTitle" }
+        )
+
+        let group = SidebarGroupHeaderTableCellView(
+            frame: NSRect(x: 0, y: 0, width: 320, height: 32)
+        )
+        group.configurePresentation(model: Self.makeGroupModel())
+        group.layoutSubtreeIfNeeded()
+        let groupTitle = try #require(
+            Self.descendants(of: group)
+                .compactMap { $0 as? NSTextField }
+                .first { $0.accessibilityIdentifier() == "SidebarWorkspaceGroupName" }
+        )
+
+        let childTitleX = childTitle.convert(.zero, to: child).x
+        let groupTitleX = groupTitle.convert(.zero, to: group).x
+        #expect(abs(childTitleX - groupTitleX) < 0.5)
+    }
+
+    @Test
     func defaultSidebarAppearanceUsesGrayNativeLiquidGlass() throws {
         let defaults = Self.makeDefaults()
         let resolver = WindowAppearanceResolver(
@@ -877,7 +906,7 @@ struct SidebarAppKitRowCellTests {
         #expect(policy.material == .underWindowBackground)
         #expect(policy.blendingMode == .withinWindow)
         #expect(policy.tintColor.hexString() == "#808080")
-        #expect(abs(policy.tintColor.alphaComponent - 0.18) < 0.01)
+        #expect(abs(policy.tintColor.alphaComponent - 0.10) < 0.01)
 
         let catalog = CmuxSettings.SettingCatalog()
         #expect(catalog.sidebarAppearance.material.defaultValue.rawValue == "liquidGlass")
@@ -901,7 +930,8 @@ struct SidebarAppKitRowCellTests {
 
         cmuxApp.migrateSidebarAppearanceDefaultsIfNeeded(defaults: previousDefault)
 
-        #expect(previousDefault.integer(forKey: "sidebarAppearanceDefaultsVersion") == 2)
+        #expect(previousDefault.integer(forKey: "sidebarAppearanceDefaultsVersion") == 3)
+        #expect(abs(previousDefault.double(forKey: "sidebarTintOpacity") - 0.10) < 0.001)
         #expect(previousDefault.string(forKey: "sidebarMaterial") == "liquidGlass")
         #expect(previousDefault.string(forKey: "sidebarTintHex") == "#808080")
 
@@ -918,7 +948,7 @@ struct SidebarAppKitRowCellTests {
 
         cmuxApp.migrateSidebarAppearanceDefaultsIfNeeded(defaults: customized)
 
-        #expect(customized.integer(forKey: "sidebarAppearanceDefaultsVersion") == 2)
+        #expect(customized.integer(forKey: "sidebarAppearanceDefaultsVersion") == 3)
         #expect(customized.string(forKey: "sidebarMaterial") == "sidebar")
         #expect(customized.string(forKey: "sidebarTintHex") == "#334455")
     }
@@ -943,7 +973,7 @@ struct SidebarAppKitRowCellTests {
         )
         group.configurePresentation(model: Self.makeGroupModel())
         let groupBackground = try #require(group.subviews.first)
-        #expect(groupBackground.layer?.cornerRadius == 8)
+        #expect(groupBackground.layer?.cornerRadius == 10)
         #expect(Self.layerBackgroundColor(of: groupBackground)?.alphaComponent == 0)
 
         group.enforcePointerHovering(true)
