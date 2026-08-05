@@ -784,6 +784,23 @@ final class MainWindowCommandPaletteController: NSObject, NSTextFieldDelegate, N
             commands: &commands,
             rank: &rank
         )
+        for descriptor in CommandPaletteSettingsToggleCommands.descriptors
+            where descriptor.isAvailable(.standard) {
+            commands.append(
+                CommandPaletteCommand(
+                    id: descriptor.commandId,
+                    rank: rank,
+                    title: descriptor.commandTitle(),
+                    subtitle: descriptor.commandSubtitle(),
+                    shortcutHint: nil,
+                    kindLabel: String(localized: "commandPalette.kind.settings", defaultValue: "Settings"),
+                    keywords: descriptor.keywords + ["settings", "toggle", descriptor.settingsKey],
+                    dismissOnRun: false,
+                    action: { descriptor.toggle() }
+                )
+            )
+            rank += 1
+        }
         return commands
     }
 

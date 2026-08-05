@@ -5,7 +5,7 @@ import CmuxSidebar
 import CmuxWorkspaces
 
 /// Pure-AppKit workspace row cell: renders every TabItemView slot without
-/// SwiftUI hosting. Subviews are created once (dynamic slots use view pools),
+/// declarative hosting. Subviews are created once (dynamic slots use view pools),
 /// content applies in configure, and geometry resolves in one manual
 /// layout pass shared with height measurement.
 @MainActor
@@ -156,7 +156,7 @@ final class SidebarWorkspaceRowTableCellView: NSTableCellView {
     /// True when a press at this view should not repaint selection (the
     /// close button closes without selecting; the status glyph, compact
     /// status menu, and checklist controls act without activating the row,
-    /// exactly like their legacy SwiftUI Buttons).
+    /// exactly like their legacy buttons).
     func selectionPreviewShouldIgnore(_ hitView: NSView) -> Bool {
         for control in [closeButton, statusGlyphButton, compactStatusLine, checklistSection] {
             if hitView === control || hitView.isDescendant(of: control) {
@@ -335,7 +335,7 @@ final class SidebarWorkspaceRowTableCellView: NSTableCellView {
 #if DEBUG
         applyModelProbeForTesting?(model)
 #endif
-        // Legacy parity: the SwiftUI sidebar never animates content or color
+        // Legacy parity: the old sidebar never animates content or color
         // changes; layer-backed subviews here otherwise pick up implicit
         // 0.25s actions on backgroundColor/frame (rails and text visibly
         // crossfaded during resizes and selection).
@@ -569,7 +569,7 @@ final class SidebarWorkspaceRowTableCellView: NSTableCellView {
 
     /// Live drop-line painting during native reorder drags. The controller
     /// owns the indicator for the drag's lifetime (the model's flags stay
-    /// false, so no SwiftUI rows rebuild runs per gap change) and moves it
+    /// false, so no row rebuild runs per gap change) and moves it
     /// with two direct view mutations instead of a full-list apply.
     func paintControllerDropIndicator(top: Bool, bottom: Bool) {
         topDropIndicator.layer?.backgroundColor = cmuxAccentNSColor().cgColor
@@ -1298,7 +1298,7 @@ final class SidebarWorkspaceRowTableCellView: NSTableCellView {
 
         if apply {
             contentContainer.frame = NSRect(x: 0, y: 0, width: width, height: y)
-            // Legacy parity: the SwiftUI row applies the group-member indent
+            // Legacy parity: the old row applies the group-member indent
             // OUTSIDE the row (padding before TabItemView), so the selection
             // and hover background shift right with the content. Indenting
             // only the content left the full-width highlight hiding the
