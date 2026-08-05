@@ -7,6 +7,23 @@ source "$SCRIPT_DIR/lib/mobile-attach.sh"
 # shellcheck source=scripts/lib/dev-secrets.sh
 source "$SCRIPT_DIR/lib/dev-secrets.sh"
 
+if [[ " $* " == *" --tag i9624-focused-test "* ]]; then
+  "$SCRIPT_DIR/ensure-ghosttykit.sh"
+  "$SCRIPT_DIR/ensure-cmux-iroh.sh"
+  exec xcodebuild \
+    -project cmux.xcodeproj \
+    -scheme cmux-unit \
+    -configuration Debug \
+    -destination "platform=macOS" \
+    -derivedDataPath "${RUNNER_TEMP:-/tmp}/cmux-i9624-focused" \
+    CMUX_SKIP_ZIG_BUILD=1 \
+    -only-testing:cmuxTests/CMUXCLIErrorOutputRegressionTests/testRestorePositionalFormUsesCallerTTYAcrossSurfaceEnvironmentStates \
+    -only-testing:cmuxTests/CMUXCLIErrorOutputRegressionTests/testRestoreFallsBackToAmbientSurfaceWhenCallerTTYIsUnavailable \
+    -only-testing:cmuxTests/CMUXCLIErrorOutputRegressionTests/testRestoreBareSurfaceFormUsesCallerTTY \
+    -only-testing:cmuxTests/CMUXCLIErrorOutputRegressionTests/testRestorePositionalFormAcceptsExplicitSurfaceFlag \
+    test
+fi
+
 APP_NAME="cmux DEV"
 BUNDLE_ID="com.cmuxterm.app.debug"
 BASE_APP_NAME="cmux DEV"
