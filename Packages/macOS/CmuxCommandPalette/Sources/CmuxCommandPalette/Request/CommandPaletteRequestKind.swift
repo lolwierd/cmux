@@ -1,14 +1,16 @@
 /// The window-agnostic policy for a command-palette open request.
 ///
 /// Each case names one way the palette can be requested (open the command list,
-/// the workspace switcher, or one of the rename/edit prompts). The app target
-/// resolves the target `NSWindow`, clears browser focus mode, and posts the
-/// notification; the per-kind policy that decides *which* notification to post
-/// and whether the request marks a pending-open lives here so it stays pure and
-/// testable.
+/// Quick Connect, the workspace switcher, or one of the rename/edit prompts).
+/// The app target resolves the target `NSWindow`, clears browser focus mode, and
+/// posts the notification; the per-kind policy that decides *which* notification
+/// to post and whether the request marks a pending-open lives here so it stays
+/// pure and testable.
 public enum CommandPaletteRequestKind: String, Sendable, CaseIterable {
     /// Opens the command list palette.
     case commands
+    /// Opens the command list scoped to Tether SSH servers.
+    case quickConnect
     /// Opens the workspace switcher palette.
     case switcher
     /// Opens the rename-tab prompt.
@@ -27,6 +29,8 @@ public enum CommandPaletteRequestKind: String, Sendable, CaseIterable {
         switch self {
         case .commands:
             return "cmux.commandPaletteRequested"
+        case .quickConnect:
+            return "cmux.quickConnectRequested"
         case .switcher:
             return "cmux.commandPaletteSwitcherRequested"
         case .renameTab:
@@ -45,7 +49,7 @@ public enum CommandPaletteRequestKind: String, Sendable, CaseIterable {
     /// change rather than a call-site edit.
     public var marksPending: Bool {
         switch self {
-        case .commands, .switcher, .renameTab, .renameWorkspace, .editWorkspaceDescription:
+        case .commands, .quickConnect, .switcher, .renameTab, .renameWorkspace, .editWorkspaceDescription:
             return true
         }
     }

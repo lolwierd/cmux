@@ -48,6 +48,9 @@ if [[ -z "$requested_archs" ]]; then
   esac
 fi
 
+strip_symbols_file="$(mktemp "${TMPDIR:-/tmp}/cmux-diff-sidecar-symbols.XXXXXX")"
+trap 'rm -f "$strip_symbols_file"' EXIT
+
 mkdir -p "$BUILD_OUTPUT_DIR"
 mkdir -p "$BUILD_WORK_DIR"
 binaries=()
@@ -60,6 +63,10 @@ for arch in $requested_archs; do
   seen_targets="$seen_targets $target"
   ensure_rust_target "$target"
   target_dir="${BUILD_WORK_DIR}/${target}"
+  # macOS 27 rejects the stripped proc-macro dylibs that Cargo tries to load
+  # during the same release build. Keep intermediate artifacts intact and
+  # strip only the final sidecar with Apple's system strip tool below.
+  CARGO_PROFILE_RELEASE_STRIP=none \
   CARGO_TARGET_DIR="$target_dir" \
     MACOSX_DEPLOYMENT_TARGET="${CMUX_DIFF_SIDECAR_MIN_MACOS:-14.0}" \
     "$CARGO_RUNNER" build \
@@ -71,6 +78,10 @@ for arch in $requested_archs; do
       --no-default-features
   source_binary="${target_dir}/${target}/release/${BINARY_NAME}"
   [[ -x "$source_binary" ]] || { echo "error: missing ${source_binary}" >&2; exit 1; }
+  nm -arch "$arch" -g "$source_binary" \
+    | awk '$1 !~ /^[Uu?]$/ && $NF != "__mh_execute_header" {print $NF}' \
+    > "$strip_symbols_file"
+  /usr/bin/strip -S -x -R "$strip_symbols_file" "$source_binary"
   binaries+=("$source_binary")
 done
 

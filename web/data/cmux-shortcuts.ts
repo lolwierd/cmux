@@ -46,6 +46,12 @@ export const shortcutCategories: ShortcutCategory[] = [
       },
       { id: "commandPalette", combos: [["⌘", "⇧", "P"]], description: { en: "Command palette", ja: "コマンドパレット" } },
       {
+        id: "quickConnect",
+        combos: [],
+        description: { en: "Quick Connect to an SSH server", ja: "SSHサーバーへのクイック接続" },
+        note: { en: "unbound by default; opens searchable SSH server commands", ja: "デフォルトでは未割り当て。検索可能なSSHサーバーコマンドを開きます" },
+      },
+      {
         id: "commandPaletteNext",
         combos: [["⌃", "N"]],
         description: { en: "Command palette next result", ja: "コマンドパレットの次の結果" },

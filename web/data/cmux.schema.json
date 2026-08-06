@@ -1599,6 +1599,7 @@
               "reopenPreviousSession",
               "goToWorkspace",
               "commandPalette",
+              "quickConnect",
               "commandPaletteNext",
               "commandPalettePrevious",
               "sendFeedback",

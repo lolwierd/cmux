@@ -187,6 +187,15 @@
          location = "group:CmuxSimulator">
       </FileRef>
       <FileRef
+         location = "group:CmuxSSHConfig">
+      </FileRef>
+      <FileRef
+         location = "group:CmuxSSHServers">
+      </FileRef>
+      <FileRef
+         location = "group:CmuxSSHServersUI">
+      </FileRef>
+      <FileRef
          location = "group:CmuxSwiftRender">
       </FileRef>
       <FileRef

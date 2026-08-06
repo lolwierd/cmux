@@ -6,6 +6,9 @@ import CmuxFeedback
 import CmuxFoundation
 import CmuxNotifications
 import CmuxPanes
+import CmuxSSHConfig
+import CmuxSSHServers
+import CmuxSSHServersUI
 import CmuxSettings
 import CmuxWorkspaces
 import Bonsplit
@@ -851,7 +854,8 @@ struct ContentView: View {
         windowId: UUID,
         featureFlags: CmuxFeatureFlags? = nil,
         sidebarUnread: SidebarUnreadModel? = nil,
-        titlebarControlsLayoutModel: TitlebarControlsLayoutModel? = nil
+        titlebarControlsLayoutModel: TitlebarControlsLayoutModel? = nil,
+        tetherServerCatalog: SSHServerCatalog? = nil
     ) {
         self.updateViewModel = updateViewModel
         self.windowId = windowId
@@ -859,6 +863,37 @@ struct ContentView: View {
         self.sidebarUnread = sidebarUnread ?? TerminalNotificationStore.shared.sidebarUnread
         self.titlebarControlsLayoutModel = titlebarControlsLayoutModel
             ?? TitlebarControlsLayoutModel()
+
+        let homeDirectory = FileManager.default.homeDirectoryForCurrentUser
+        let fileSystem = LocalSSHConfigFileSystem(
+            fileManager: FileManager.default,
+            homeDirectory: homeDirectory
+        )
+        let commandRunner = LocalSSHCommandRunner()
+        let resolver = OpenSSHConfigurationResolver(commandRunner: commandRunner)
+        let metadataStore = LocalTetherMetadataStore(
+            fileURL: homeDirectory
+                .appendingPathComponent(".config", isDirectory: true)
+                .appendingPathComponent("cmux", isDirectory: true)
+                .appendingPathComponent("tether.json")
+        )
+        let source = SSHConfigurationCatalogSource(
+            rootURL: homeDirectory
+                .appendingPathComponent(".ssh", isDirectory: true)
+                .appendingPathComponent("config"),
+            fileSystem: fileSystem,
+            resolver: resolver,
+            metadataStore: metadataStore,
+            watcher: SSHConfigFileWatcher()
+        )
+        let catalog = tetherServerCatalog ?? SSHServerCatalog(source: source)
+        self._tetherServerCatalog = State(initialValue: catalog)
+        self._tetherConnectionCoordinator = State(
+            initialValue: SSHServerConnectionCoordinator(
+                catalog: catalog,
+                launcher: TetherSSHServerConnectionLauncher()
+            )
+        )
     }
 
     @EnvironmentObject var tabManager: TabManager
@@ -917,6 +952,8 @@ struct ContentView: View {
     @StateObject private var fullscreenControlsViewModel = TitlebarControlsViewModel()
     @StateObject private var fileExplorerStore = FileExplorerStore()
     @StateObject private var sessionIndexStore = SessionIndexStore()
+    @State var tetherServerCatalog: SSHServerCatalog
+    @State var tetherConnectionCoordinator: SSHServerConnectionCoordinator
     @StateObject private var selectedWorkspaceDirectoryObserver = SelectedWorkspaceDirectoryObserver()
     @State private var commandPaletteOverlayRenderModel = CommandPaletteOverlayRenderModel()
     @State private var backgroundWorkspacePrimeCoordinator = BackgroundWorkspacePrimeCoordinator()
@@ -1746,8 +1783,12 @@ struct ContentView: View {
                 )
             },
             observedWindowReference: observedWindowReference,
+            tetherServerCatalog: tetherServerCatalog,
+            tetherConnectionCoordinator: tetherConnectionCoordinator,
             selection: $sidebarSelectionState.selection,
-            selectedTabIds: $selectedTabIds, lastSidebarSelectionIndex: $lastSidebarSelectionIndex, sidebarRenderWorkerClient: $sidebarRenderWorkerClient
+            selectedTabIds: $selectedTabIds,
+            lastSidebarSelectionIndex: $lastSidebarSelectionIndex,
+            sidebarRenderWorkerClient: $sidebarRenderWorkerClient
         )
         return Group {
             if featureFlags.isAppKitSidebarListEnabled {
@@ -3060,6 +3101,17 @@ struct ContentView: View {
                 mainWindow: NSApp.mainWindow
             ) else { return }
             openCommandPaletteCommands()
+        })
+
+        view = AnyView(view.onReceive(NotificationCenter.default.publisher(for: .quickConnectRequested)) { notification in
+            let requestedWindow = notification.object as? NSWindow
+            guard Self.shouldHandleCommandPaletteRequest(
+                observedWindow: observedWindow,
+                requestedWindow: requestedWindow,
+                keyWindow: NSApp.keyWindow,
+                mainWindow: NSApp.mainWindow
+            ) else { return }
+            openCommandPaletteQuickConnect()
         })
 
         view = AnyView(view.onReceive(NotificationCenter.default.publisher(for: .savedLayoutSaveRequested)) { notification in
@@ -8111,6 +8163,8 @@ struct ContentView: View {
             )
         }
 
+        contributions.append(contentsOf: tetherServerCommandPaletteContributions())
+
         return contributions
     }
 
@@ -8358,6 +8412,7 @@ struct ContentView: View {
         registerCanvasCommandHandlers(&registry)
         registerCloudCommandHandlers(&registry)
         registerSavedLayoutCommandHandlers(&registry)
+        registerTetherServerCommandHandlers(&registry)
         registry.register(commandId: "palette.showNotifications") {
             AppDelegate.shared?.toggleNotificationsPopover(animated: false)
         }
@@ -9218,6 +9273,15 @@ struct ContentView: View {
 
     private func openCommandPaletteCommands() {
         handleCommandPaletteListRequest(scope: .commands)
+    }
+
+    private func openCommandPaletteQuickConnect() {
+        let initialQuery = "\(Self.commandPaletteCommandsPrefix)tether "
+        if !isCommandPalettePresented {
+            presentCommandPalette(initialQuery: initialQuery)
+            return
+        }
+        resetCommandPaletteListState(initialQuery: initialQuery)
     }
 
     private func openCommandPaletteSwitcher() {
@@ -10538,6 +10602,8 @@ struct VerticalTabsSidebar: View, Equatable {
             && lhs.featureFlags === rhs.featureFlags
             && lhs.sidebarUnread === rhs.sidebarUnread
             && lhs.titlebarControlsLayoutModel === rhs.titlebarControlsLayoutModel
+            && lhs.tetherServerCatalog === rhs.tetherServerCatalog
+            && lhs.tetherSidebarModeRawValue == rhs.tetherSidebarModeRawValue
             && lhs.isPresented == rhs.isPresented
     }
 
@@ -10552,6 +10618,8 @@ struct VerticalTabsSidebar: View, Equatable {
     let onToggleSidebar: () -> Void
     let onNewTab: () -> Void
     let observedWindowReference: WeakWindowReference
+    let tetherServerCatalog: SSHServerCatalog
+    let tetherConnectionCoordinator: SSHServerConnectionCoordinator
     var observedWindow: NSWindow? { observedWindowReference.window }
     @EnvironmentObject var tabManager: TabManager
     // Plain reference by design. Native row and titlebar subscribers own the
@@ -10562,6 +10630,7 @@ struct VerticalTabsSidebar: View, Equatable {
     @Binding var selectedTabIds: Set<UUID>
     @Binding var lastSidebarSelectionIndex: Int?
     @Binding var sidebarRenderWorkerClient: RenderWorkerClient?
+    @AppStorage("tether.sidebar.mode") private var tetherSidebarModeRawValue = SSHSidebarMode.workspaces.rawValue
     @State var modifierKeyMonitor = WindowScopedShortcutHintModifierMonitor(activation: .commandOnly)
     @State var pointerInteractionMonitor = SidebarPointerInteractionMonitor()
     @StateObject var dragAutoScrollController = SidebarDragAutoScrollController()
@@ -10958,11 +11027,12 @@ struct VerticalTabsSidebar: View, Equatable {
 #if DEBUG
         let _ = { minimalModeInvalidationProbe.verticalTabsSidebarBody?() }()
 #endif
+        let tetherSidebarMode = SSHSidebarMode(rawValue: tetherSidebarModeRawValue) ?? .workspaces
         let signpost = SidebarProfilingSignposts.begin("vertical-sidebar-body", "workspaces=\(tabManager.tabs.count) selected=\(sidebarShortTabId(tabManager.selectedTabId))")
         // Retain the native table identity while hidden without continuing the
         // O(workspaces) projection pipeline. Reveal rebuilds one authoritative
         // snapshot from the current model before the controller applies again.
-        let tabs = isPresented ? tabManager.tabs : []
+        let tabs = isPresented && tetherSidebarMode == .workspaces ? tabManager.tabs : []
         let workspaceCount = tabs.count
         let canCloseWorkspace = workspaceCount > 1
         let workspaceNumberShortcut = self.workspaceNumberShortcut
@@ -10989,7 +11059,7 @@ struct VerticalTabsSidebar: View, Equatable {
             }
         let allSelectedRemoteContextMenuTargetsDisconnected = !selectedRemoteContextMenuTargets.isEmpty &&
             selectedRemoteContextMenuTargets.allSatisfy { $0.remoteConnectionState == .disconnected }
-        let workspaceGroups = isPresented ? tabManager.workspaceGroups : []
+        let workspaceGroups = isPresented && tetherSidebarMode == .workspaces ? tabManager.workspaceGroups : []
         let workspaceGroupById = Dictionary(uniqueKeysWithValues: workspaceGroups.map { ($0.id, $0) })
         let memberWorkspaceIdsByGroupId = SidebarWorkspaceRenderItem.memberWorkspaceIdsByGroupId(tabs: tabs)
         let workspaceGroupMenuSnapshot = WorkspaceGroupMenuSnapshot(
@@ -11054,20 +11124,45 @@ struct VerticalTabsSidebar: View, Equatable {
             visibleWorkspaceRowIds: visibleWorkspaceRowIds
         )
         let _ = SidebarProfilingSignposts.end(signpost)
-        ZStack(alignment: .bottomLeading) {
-            if CmuxExtensionSidebarSelection.resolvesToDefaultSidebar(effectiveProviderId: effectiveExtensionSidebarProviderId) {
-                workspaceScrollArea(renderContext: renderContext)
-            } else {
-                extensionSidebarScrollArea(renderContext: renderContext)
-            }
-            if isPresented {
-                SidebarFooter(
-                    updateViewModel: updateViewModel,
-                    fileExplorerState: fileExplorerState,
-                    modifierKeyMonitor: modifierKeyMonitor,
-                    onSendFeedback: onSendFeedback
+        VStack(spacing: 0) {
+            SSHSidebarModePicker(
+                selection: Binding(
+                    get: { SSHSidebarMode(rawValue: tetherSidebarModeRawValue) ?? .workspaces },
+                    set: { tetherSidebarModeRawValue = $0.rawValue }
                 )
-                .frame(maxWidth: .infinity, alignment: .leading)
+            )
+            .padding(.horizontal, 10)
+            .padding(.top, SidebarWorkspaceListMetrics.firstRowTopOffset + 8)
+            .padding(.bottom, 7)
+
+            if tetherSidebarMode == .servers {
+                SSHServersSidebar(
+                    catalog: tetherServerCatalog,
+                    connectionCoordinator: tetherConnectionCoordinator,
+                    onSelect: { server in
+                        _ = tetherConnectionCoordinator.connect(server: server)
+                    },
+                    onSelectInBackground: { server in
+                        _ = tetherConnectionCoordinator.connect(server: server, focus: false)
+                    }
+                )
+            } else {
+                ZStack(alignment: .bottomLeading) {
+                    if CmuxExtensionSidebarSelection.resolvesToDefaultSidebar(effectiveProviderId: effectiveExtensionSidebarProviderId) {
+                        workspaceScrollArea(renderContext: renderContext)
+                    } else {
+                        extensionSidebarScrollArea(renderContext: renderContext)
+                    }
+                    if isPresented {
+                        SidebarFooter(
+                            updateViewModel: updateViewModel,
+                            fileExplorerState: fileExplorerState,
+                            modifierKeyMonitor: modifierKeyMonitor,
+                            onSendFeedback: onSendFeedback
+                        )
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
             }
         }
         .accessibilityIdentifier("Sidebar")

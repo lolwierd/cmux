@@ -9295,6 +9295,54 @@ struct CMUXCLI {
         }
     }
 
+    /// Adds a plain OpenSSH terminal to an already selected workspace.
+    ///
+    /// Tether uses this path because remote configuration belongs to an entire
+    /// workspace. Applying the managed workspace configuration here would
+    /// reinterpret existing local terminals in that workspace as remote ones.
+    private func runSSHTerminalInExistingWorkspace(
+        options: SSHCommandOptions,
+        workspaceRaw: String,
+        client: SocketClient,
+        jsonOutput: Bool,
+        idFormat: CLIIDFormat
+    ) throws {
+        guard let workspaceID = try normalizeWorkspaceHandle(
+            workspaceRaw,
+            client: client,
+            windowHandle: options.windowRaw
+        ) else {
+            throw CLIError(message: "ssh: workspace not found: \(workspaceRaw)")
+        }
+
+        var params: [String: Any] = [
+            "workspace_id": workspaceID,
+            "initial_command": buildSSHCommandText(options),
+            "focus": !options.noFocus,
+        ]
+        if let agentSocketPath = options.agentSocketPath {
+            params["initial_env"] = [
+                "SSH_AUTH_SOCK": agentSocketPath,
+            ]
+        }
+
+        let payload = try client.sendV2(method: "surface.create", params: params)
+        guard let surfaceID = payload["surface_id"] as? String,
+              !surfaceID.isEmpty else {
+            throw CLIError(message: "ssh: surface.create did not return surface_id")
+        }
+        cliDebugLog(
+            "cli.ssh.surface.created workspace=\(String(workspaceID.prefix(8))) " +
+            "surface=\(String(surfaceID.prefix(8))) target=\(options.displayDestination)"
+        )
+        printV2Payload(
+            payload,
+            jsonOutput: jsonOutput,
+            idFormat: idFormat,
+            fallbackText: v2CreationSummary(payload, idFormat: idFormat, kinds: ["surface", "pane", "workspace"])
+        )
+    }
+
     /// Generic "open a workspace, SSH into the remote, bootstrap cmuxd-remote, forward socket,
     /// drop the user in a shell" pipeline. The inner loop of `cmux ssh`; also called from
     /// `cmux vm new`/`shell`/`attach` so cloud VMs reuse the exact same bootstrap.
@@ -9343,6 +9391,17 @@ struct CMUXCLI {
         )
         if resolvedUserSSHConfiguration != nil {
             sshOptions.sshOptions = resolvedCmuxControlPathOptions(for: sshOptions)
+        }
+
+        if let workspaceRaw = sshOptions.workspaceRaw {
+            try runSSHTerminalInExistingWorkspace(
+                options: sshOptions,
+                workspaceRaw: workspaceRaw,
+                client: client,
+                jsonOutput: jsonOutput,
+                idFormat: idFormat
+            )
+            return
         }
         // Treat the OpenSSH setting as the host's default interactive
         // program. Explicit cmux commands and terminal profiles continue to
@@ -9884,6 +9943,7 @@ struct CMUXCLI {
         var workspaceName: String?
         var initialCommand: String?
         var windowRaw: String?
+        var workspaceRaw: String?
         var noFocus = false
         var sshOptions: [String] = []
         var extraArguments: [String] = []
@@ -9941,6 +10001,12 @@ struct CMUXCLI {
                     throw CLIError(message: "ssh: --window requires a window id")
                 }
                 windowRaw = commandArgs[index + 1]
+                index += 2
+            case "--workspace":
+                guard index + 1 < commandArgs.count else {
+                    throw CLIError(message: "ssh: --workspace requires a workspace id")
+                }
+                workspaceRaw = commandArgs[index + 1]
                 index += 2
             case "--no-focus":
                 noFocus = true
@@ -10024,6 +10090,7 @@ struct CMUXCLI {
             workspaceName: workspaceName,
             initialCommand: initialCommand,
             windowRaw: windowRaw ?? windowOverride,
+            workspaceRaw: workspaceRaw,
             noFocus: noFocus,
             sshOptions: agentForwarding.sshOptions,
             extraArguments: extraArguments,

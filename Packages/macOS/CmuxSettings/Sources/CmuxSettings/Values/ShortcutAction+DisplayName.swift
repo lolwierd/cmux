@@ -22,6 +22,7 @@ extension ShortcutAction {
         case .reopenPreviousSession: return "Restore Previous App Launch"
         case .goToWorkspace: return "Go to Workspace…"
         case .commandPalette: return "Command Palette…"
+        case .quickConnect: return "Quick Connect"
         case .commandPaletteNext: return "Command Palette: Next"
         case .commandPalettePrevious: return "Command Palette: Previous"
         case .sendFeedback: return "Send Feedback"

@@ -5372,6 +5372,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         )
     }
 
+    func requestQuickConnect(preferredWindow: NSWindow? = nil, source: String = "api.quickConnect") {
+        postCommandPaletteRequest(
+            kind: .quickConnect,
+            preferredWindow: preferredWindow,
+            source: source
+        )
+    }
+
     func requestCommandPaletteSwitcher(preferredWindow: NSWindow? = nil, source: String = "api.commandPaletteSwitcher") {
         postCommandPaletteRequest(
             kind: .switcher,
@@ -13525,6 +13533,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 return true
             }
 
+            if matchConfiguredShortcut(event: event, action: .quickConnect) {
+                let targetWindow = commandPaletteTargetWindow ?? event.window ?? shortcutRoutingActiveWindow
+                requestQuickConnect(preferredWindow: targetWindow, source: "shortcut.quickConnect")
+                return true
+            }
+
             if !hasFocusedAddressBarInShortcutContext,
                matchConfiguredShortcut(event: event, action: .goToWorkspace) {
                 let targetWindow = commandPaletteTargetWindow ?? event.window ?? shortcutRoutingActiveWindow
@@ -13789,6 +13803,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if matchConfiguredShortcut(event: event, action: .commandPalette) {
             let targetWindow = commandPaletteTargetWindow ?? event.window ?? shortcutRoutingActiveWindow
             requestCommandPaletteCommands(preferredWindow: targetWindow, source: "shortcut.commandPalette")
+            return true
+        }
+
+        if matchConfiguredShortcut(event: event, action: .quickConnect) {
+            let targetWindow = commandPaletteTargetWindow ?? event.window ?? shortcutRoutingActiveWindow
+            requestQuickConnect(preferredWindow: targetWindow, source: "shortcut.quickConnect")
             return true
         }
 

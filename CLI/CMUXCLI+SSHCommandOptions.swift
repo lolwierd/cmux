@@ -10,6 +10,8 @@ extension CMUXCLI {
         let workspaceName: String?
         let initialCommand: String?
         let windowRaw: String?
+        /// An existing workspace to receive a new terminal surface.
+        let workspaceRaw: String?
         let noFocus: Bool
         var sshOptions: [String]
         let extraArguments: [String]
@@ -33,6 +35,7 @@ extension CMUXCLI {
             workspaceName: String?,
             initialCommand: String? = nil,
             windowRaw: String? = nil,
+            workspaceRaw: String? = nil,
             noFocus: Bool,
             sshOptions: [String],
             extraArguments: [String],
@@ -53,6 +56,7 @@ extension CMUXCLI {
             self.workspaceName = workspaceName
             self.initialCommand = initialCommand
             self.windowRaw = windowRaw
+            self.workspaceRaw = workspaceRaw
             self.noFocus = noFocus
             self.sshOptions = sshOptions
             self.extraArguments = extraArguments

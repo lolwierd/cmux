@@ -1,5 +1,6 @@
 import AppKit
 import CmuxFoundation
+import CmuxSSHServers
 import CmuxSettings
 import Bonsplit
 import Foundation
@@ -282,6 +283,47 @@ final class CmuxSSHURLProcessLauncher {
 
     @discardableResult
     func start(request: CmuxSSHURLRequest, preferredWindow: NSWindow?) -> Bool {
+        start(
+            cliArguments: request.cliArguments,
+            targetLength: request.destination.count,
+            preferredWindow: preferredWindow,
+            onCompletion: nil
+        )
+    }
+
+    /// Starts the existing `cmux ssh` workflow for a literal SSH alias.
+    ///
+    /// This is the Tether adapter. The alias is passed as one unchanged argv
+    /// element, preserving OpenSSH's normal config lookup and quoting rules.
+    @discardableResult
+    func startSSH(
+        destination: String,
+        preferredWindow: NSWindow?,
+        focus: Bool = true,
+        onCompletion: @escaping @MainActor (SSHServerConnectionLaunchEvent) -> Void = { _ in }
+    ) -> Bool {
+        let selectedWorkspaceID = AppDelegate.shared?
+            .contextForMainWindow(preferredWindow)?
+            .tabManager
+            .selectedWorkspace?
+            .id
+        return start(
+            cliArguments: focus ? ["ssh", destination] : ["ssh", "--no-focus", destination],
+            targetLength: destination.count,
+            preferredWindow: preferredWindow,
+            selectedWorkspaceID: selectedWorkspaceID,
+            onCompletion: onCompletion
+        )
+    }
+
+    @discardableResult
+    private func start(
+        cliArguments: [String],
+        targetLength: Int,
+        preferredWindow: NSWindow?,
+        selectedWorkspaceID: UUID? = nil,
+        onCompletion: (@MainActor (SSHServerConnectionLaunchEvent) -> Void)?
+    ) -> Bool {
         let cliURL = Bundle.main.resourceURL?.appendingPathComponent("bin/cmux")
         guard let cliURL,
               FileManager.default.isExecutableFile(atPath: cliURL.path) else {
@@ -299,7 +341,11 @@ final class CmuxSSHURLProcessLauncher {
         let socketPath = resolvedSocketPath()
         let process = Process()
         process.executableURL = cliURL
-        process.arguments = ["--socket", socketPath] + request.cliArguments
+        process.arguments = ["--socket", socketPath] + windowScopedCLIArguments(
+            cliArguments,
+            preferredWindow: preferredWindow,
+            selectedWorkspaceID: selectedWorkspaceID
+        )
         var environment = ProcessInfo.processInfo.environment
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_BUNDLED_CLI_PATH"] = cliURL.path
@@ -318,6 +364,11 @@ final class CmuxSSHURLProcessLauncher {
             let terminationStatus = terminatedProcess.terminationStatus
             Task { @MainActor in
                 Self.shared.processes.removeValue(forKey: processIdentifier)
+                if terminationStatus == 0 {
+                    onCompletion?(.ready)
+                } else {
+                    onCompletion?(.failed(message: Self.shared.failureDiagnostic(from: output)))
+                }
                 guard terminationStatus != 0, !Self.shared.isShuttingDown else { return }
                 let format = String(
                     localized: "dialog.sshURL.launchFailed.exit",
@@ -335,7 +386,7 @@ final class CmuxSSHURLProcessLauncher {
             try process.run()
             processes[process.processIdentifier] = process
 #if DEBUG
-            cmuxDebugLog("sshURL.launchCLI pid=\(process.processIdentifier) socket=\(socketPath) targetLength=\(request.destination.count)")
+            cmuxDebugLog("sshURL.launchCLI pid=\(process.processIdentifier) socket=\(socketPath) targetLength=\(targetLength)")
 #endif
             return true
         } catch {
@@ -356,6 +407,36 @@ final class CmuxSSHURLProcessLauncher {
         TerminalController.shared.activeSocketPath(
             preferredPath: SocketControlSettings.socketPath()
         )
+    }
+
+    private func windowScopedCLIArguments(
+        _ arguments: [String],
+        preferredWindow: NSWindow?,
+        selectedWorkspaceID: UUID? = nil
+    ) -> [String] {
+        var scopedArguments = arguments
+        let insertionIndex = scopedArguments.firstIndex(of: "--") ?? scopedArguments.endIndex
+        var scopedValues: [String] = []
+        if !arguments.contains("--window"),
+           let windowID = AppDelegate.shared?.contextForMainWindow(preferredWindow)?.windowId {
+            scopedValues += ["--window", windowID.uuidString]
+        }
+        if !arguments.contains("--workspace"),
+           let selectedWorkspaceID {
+            scopedValues += ["--workspace", selectedWorkspaceID.uuidString]
+        }
+        guard !scopedValues.isEmpty else { return arguments }
+        scopedArguments.insert(contentsOf: scopedValues, at: insertionIndex)
+        return scopedArguments
+    }
+
+    private func failureDiagnostic(from output: String) -> String {
+        output
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+            .map { String($0.prefix(240)) }
+            ?? ""
     }
 
     private func presentLaunchFailure(summary: String, output: String, preferredWindow: NSWindow?) {

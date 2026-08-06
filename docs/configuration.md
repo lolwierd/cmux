@@ -151,6 +151,8 @@ The spinner is compositor-driven (a Core Animation transform run by the render s
 
 ## Workspace terminal font size shortcuts
 
+Quick Connect opens the searchable SSH server commands in the Command Palette. It is unbound by default because the nearby Cmd-key combinations are already used by terminal and simulator actions. Bind it with `shortcuts.bindings.quickConnect`, for example `"cmd+shift+q"`, from Settings > Keyboard Shortcuts or `cmux.json`.
+
 Cmd+Ctrl+= and Cmd+Ctrl+- increase or decrease every terminal in the selected workspace by one point. Cmd+Ctrl+0 resets them to the current Ghostty font size. Hidden, hibernated, and Dock terminals change with visible terminals, and newly created terminals inherit the workspace size. Rebind them with `shortcuts.bindings.increaseWorkspaceTerminalFontSize`, `shortcuts.bindings.decreaseWorkspaceTerminalFontSize`, and `shortcuts.bindings.resetWorkspaceTerminalFontSize`.
 
 ## `terminal.textBoxSubmitActions`
